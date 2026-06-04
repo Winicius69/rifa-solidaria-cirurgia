@@ -1,0 +1,34 @@
+:root {
+  font-family:
+    'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #111827;
+  background: #f5f7fb;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f5f7fb;
+}
+
+button,
+h1,
+h2,
+p {
+  margin-block-start: 0;
+}
+
+button {
+  cursor: pointer;
+}
