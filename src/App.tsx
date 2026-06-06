@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import './App.css'
+import { supabase } from './lib/supabase'
 
 type NumberStatus = 'livre' | 'reservado' | 'pago'
 
@@ -25,10 +26,17 @@ type DrawWinner = {
   whatsApp: string
 }
 
+type SupabaseRaffleNumberRow = {
+  id: number
+  label: string
+  status: string
+  reserved_by_name: string | null
+  reserved_by_whatsapp: string | null
+}
+
 const ticketPrice = 10
 const totalRaffleNumbers = 500
 const totalPrizes = 6
-const raffleNumbersStorageKey = 'raffleNumbers'
 const raffleDrawStorageKey = 'raffleDrawResult'
 const raffleOwnerWhatsApp = '63984773055'
 const adminPassword = '10112001'
@@ -66,24 +74,6 @@ function isValidNumberStatus(value: unknown): value is NumberStatus {
   return value === 'livre' || value === 'reservado' || value === 'pago'
 }
 
-function isValidRaffleNumber(value: unknown): value is RaffleNumber {
-  if (typeof value !== 'object' || value === null) {
-    return false
-  }
-
-  const candidate = value as Record<string, unknown>
-
-  return (
-    typeof candidate.id === 'number' &&
-    typeof candidate.label === 'string' &&
-    isValidNumberStatus(candidate.status) &&
-    (candidate.reservedByName === undefined ||
-      typeof candidate.reservedByName === 'string') &&
-    (candidate.reservedByWhatsApp === undefined ||
-      typeof candidate.reservedByWhatsApp === 'string')
-  )
-}
-
 function isValidDrawWinner(value: unknown): value is DrawWinner {
   if (typeof value !== 'object' || value === null) {
     return false
@@ -97,30 +87,6 @@ function isValidDrawWinner(value: unknown): value is DrawWinner {
     typeof candidate.fullName === 'string' &&
     typeof candidate.whatsApp === 'string'
   )
-}
-
-function loadStoredRaffleNumbers() {
-  const storedValue = window.localStorage.getItem(raffleNumbersStorageKey)
-
-  if (!storedValue) {
-    return initialRaffleNumbers
-  }
-
-  try {
-    const parsedValue: unknown = JSON.parse(storedValue)
-
-    if (
-      Array.isArray(parsedValue) &&
-      parsedValue.length === totalRaffleNumbers &&
-      parsedValue.every(isValidRaffleNumber)
-    ) {
-      return parsedValue
-    }
-  } catch {
-    return initialRaffleNumbers
-  }
-
-  return initialRaffleNumbers
 }
 
 function loadStoredDrawResult() {
@@ -180,18 +146,21 @@ function buildWhatsAppLink(reservation: ConfirmedReservation) {
 function App() {
   const isAdminMode = window.location.search.includes('admin=1')
   const [raffleNumbers, setRaffleNumbers] =
-    useState<RaffleNumber[]>(loadStoredRaffleNumbers)
+    useState<RaffleNumber[]>(initialRaffleNumbers)
+  const [raffleNumbersError, setRaffleNumbersError] = useState('')
   const [activeFilter, setActiveFilter] =
     useState<(typeof filterOptions)[number]['value']>('todos')
   const [selectedNumbers, setSelectedNumbers] = useState<number[]>([])
   const [showReservationForm, setShowReservationForm] = useState(false)
   const [fullName, setFullName] = useState('')
   const [whatsApp, setWhatsApp] = useState('')
+  const [reservationError, setReservationError] = useState('')
   const [lastReservation, setLastReservation] =
     useState<ConfirmedReservation | null>(null)
   const [adminPasswordInput, setAdminPasswordInput] = useState('')
   const [adminUnlocked, setAdminUnlocked] = useState(false)
   const [adminError, setAdminError] = useState('')
+  const [adminActionError, setAdminActionError] = useState('')
   const [drawResult, setDrawResult] = useState<DrawWinner[] | null>(
     loadStoredDrawResult,
   )
@@ -199,11 +168,56 @@ function App() {
   const isAdminView = isAdminMode && adminUnlocked
 
   useEffect(() => {
-    window.localStorage.setItem(
-      raffleNumbersStorageKey,
-      JSON.stringify(raffleNumbers),
-    )
-  }, [raffleNumbers])
+    let isMounted = true
+
+    async function fetchRaffleNumbers() {
+      setRaffleNumbersError('')
+
+      const { data, error } = await supabase
+        .from('raffle_numbers')
+        .select('id, label, status, reserved_by_name, reserved_by_whatsapp')
+        .order('id', { ascending: true })
+
+      if (!isMounted) {
+        return
+      }
+
+      if (error) {
+        setRaffleNumbersError('Não foi possível carregar os números online.')
+        return
+      }
+
+      const rows = (data ?? []) as SupabaseRaffleNumberRow[]
+      const mappedNumbers = rows.flatMap((row) => {
+        if (!isValidNumberStatus(row.status)) {
+          return []
+        }
+
+        return [
+          {
+            id: row.id,
+            label: row.label,
+            status: row.status,
+            reservedByName: row.reserved_by_name ?? undefined,
+            reservedByWhatsApp: row.reserved_by_whatsapp ?? undefined,
+          },
+        ]
+      })
+
+      if (mappedNumbers.length !== totalRaffleNumbers) {
+        setRaffleNumbersError('A base online de números está incompleta.')
+        return
+      }
+
+      setRaffleNumbers(mappedNumbers)
+    }
+
+    void fetchRaffleNumbers()
+
+    return () => {
+      isMounted = false
+    }
+  }, [])
 
   useEffect(() => {
     if (drawResult) {
@@ -277,10 +291,12 @@ function App() {
     })
   }
 
-  function handleConfirmReservation() {
+  async function handleConfirmReservation() {
     if (!canConfirmReservation) {
       return
     }
+
+    setReservationError('')
 
     const normalizedWhatsApp = normalizeWhatsApp(whatsApp)
 
@@ -291,55 +307,159 @@ function App() {
       total: selectedTotal,
     }
 
-    setLastReservation(reservationSnapshot)
+    const { data, error } = await supabase
+      .from('raffle_numbers')
+      .update({
+        status: 'reservado',
+        reserved_by_name: fullName,
+        reserved_by_whatsapp: normalizedWhatsApp,
+        updated_at: new Date().toISOString(),
+      })
+      .in('id', selectedNumbers)
+      .eq('status', 'livre')
+      .select('id, label, status, reserved_by_name, reserved_by_whatsapp')
+
+    if (error) {
+      setReservationError('Não foi possível concluir a reserva agora.')
+      return
+    }
+
+    if (!data || data.length !== selectedNumbers.length) {
+      setReservationError(
+        'Um ou mais números já foram reservados. Atualize a página e escolha novamente.',
+      )
+      return
+    }
+
+    const updatedNumbers = data.flatMap((row) => {
+      if (!isValidNumberStatus(row.status)) {
+        return []
+      }
+
+      return [
+        {
+          id: row.id,
+          label: row.label,
+          status: row.status,
+          reservedByName: row.reserved_by_name ?? undefined,
+          reservedByWhatsApp: row.reserved_by_whatsapp ?? undefined,
+        },
+      ]
+    })
+
+    if (updatedNumbers.length !== selectedNumbers.length) {
+      setReservationError(
+        'Um ou mais números já foram reservados. Atualize a página e escolha novamente.',
+      )
+      return
+    }
 
     setRaffleNumbers((current) =>
       current.map((number) =>
-        selectedNumbers.includes(number.id)
-          ? {
-              ...number,
-              status: 'reservado',
-              reservedByName: fullName,
-              reservedByWhatsApp: normalizedWhatsApp,
-            }
-          : number,
+        updatedNumbers.find((updatedNumber) => updatedNumber.id === number.id) ??
+        number,
       ),
     )
 
+    setLastReservation(reservationSnapshot)
     setSelectedNumbers([])
     setShowReservationForm(false)
     setFullName('')
     setWhatsApp('')
   }
 
-  function handleReleaseNumber(id: number) {
+  async function handleReleaseNumber(id: number) {
+    setAdminActionError('')
+
+    const { data, error } = await supabase
+      .from('raffle_numbers')
+      .update({
+        status: 'livre',
+        reserved_by_name: null,
+        reserved_by_whatsapp: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select('id, label, status, reserved_by_name, reserved_by_whatsapp')
+      .single()
+
+    if (error || !data || !isValidNumberStatus(data.status)) {
+      setAdminActionError('Não foi possível liberar o número agora.')
+      return
+    }
+
+    const updatedNumber: RaffleNumber = {
+      id: data.id,
+      label: data.label,
+      status: data.status,
+      reservedByName: data.reserved_by_name ?? undefined,
+      reservedByWhatsApp: data.reserved_by_whatsapp ?? undefined,
+    }
+
     setRaffleNumbers((current) =>
-      current.map((number) =>
-        number.id === id
-          ? {
-              ...number,
-              status: 'livre',
-              reservedByName: undefined,
-              reservedByWhatsApp: undefined,
-            }
-          : number,
-      ),
+      current.map((number) => (number.id === id ? updatedNumber : number)),
     )
   }
 
-  function handleMarkAsPaid(id: number) {
+  async function handleMarkAsPaid(id: number) {
+    setAdminActionError('')
+
+    const { data, error } = await supabase
+      .from('raffle_numbers')
+      .update({
+        status: 'pago',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select('id, label, status, reserved_by_name, reserved_by_whatsapp')
+      .single()
+
+    if (error || !data || !isValidNumberStatus(data.status)) {
+      setAdminActionError('Não foi possível marcar o número como pago.')
+      return
+    }
+
+    const updatedNumber: RaffleNumber = {
+      id: data.id,
+      label: data.label,
+      status: data.status,
+      reservedByName: data.reserved_by_name ?? undefined,
+      reservedByWhatsApp: data.reserved_by_whatsapp ?? undefined,
+    }
+
     setRaffleNumbers((current) =>
-      current.map((number) =>
-        number.id === id ? { ...number, status: 'pago' } : number,
-      ),
+      current.map((number) => (number.id === id ? updatedNumber : number)),
     )
   }
 
-  function handleRevertToReserved(id: number) {
+  async function handleRevertToReserved(id: number) {
+    setAdminActionError('')
+
+    const { data, error } = await supabase
+      .from('raffle_numbers')
+      .update({
+        status: 'reservado',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select('id, label, status, reserved_by_name, reserved_by_whatsapp')
+      .single()
+
+    if (error || !data || !isValidNumberStatus(data.status)) {
+      setAdminActionError('Não foi possível voltar o número para reservado.')
+      return
+    }
+
+    const updatedNumber: RaffleNumber = {
+      id: data.id,
+      label: data.label,
+      status: data.status,
+      reservedByName: data.reserved_by_name ?? undefined,
+      reservedByWhatsApp: data.reserved_by_whatsapp ?? undefined,
+    }
+
     setRaffleNumbers((current) =>
-      current.map((number) =>
-        number.id === id ? { ...number, status: 'reservado' } : number,
-      ),
+      current.map((number) => (number.id === id ? updatedNumber : number)),
     )
   }
 
@@ -439,10 +559,12 @@ function App() {
           <p className="hero__text">
             Escolha seus números, faça sua reserva e participe da rifa.
           </p>
-        </header>
+      </header>
       ) : null}
 
       <main className="content">
+        {raffleNumbersError ? <p>{raffleNumbersError}</p> : null}
+
         {!isAdminView ? (
           <>
             <section className="card">
@@ -536,6 +658,10 @@ function App() {
               </div>
             ) : (
               <>
+                {adminActionError ? (
+                  <p className="admin-action-error">{adminActionError}</p>
+                ) : null}
+
                 <div className="admin-summary">
                   <div className="admin-summary__item">
                     <span>Números livres</span>
@@ -777,10 +903,14 @@ function App() {
                   type="button"
                   className="confirm-button"
                   disabled={!canConfirmReservation}
-                  onClick={handleConfirmReservation}
+                  onClick={() => void handleConfirmReservation()}
                 >
                   Confirmar reserva
                 </button>
+
+                {reservationError ? (
+                  <p className="reservation-error">{reservationError}</p>
+                ) : null}
               </form>
             ) : null}
 
