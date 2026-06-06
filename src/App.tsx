@@ -34,10 +34,19 @@ type SupabaseRaffleNumberRow = {
   reserved_by_whatsapp: string | null
 }
 
+type SupabaseDrawWinnerRow = {
+  id: number
+  prize: string
+  number_label: string
+  full_name: string
+  whatsapp: string
+  created_at: string
+}
+
 const ticketPrice = 10
 const totalRaffleNumbers = 500
 const totalPrizes = 6
-const raffleDrawStorageKey = 'raffleDrawResult'
+const lastConfirmedReservationStorageKey = 'lastConfirmedReservation'
 const raffleOwnerWhatsApp = '63984773055'
 const adminPassword = '10112001'
 
@@ -89,8 +98,28 @@ function isValidDrawWinner(value: unknown): value is DrawWinner {
   )
 }
 
-function loadStoredDrawResult() {
-  const storedValue = window.localStorage.getItem(raffleDrawStorageKey)
+function isValidConfirmedReservation(
+  value: unknown,
+): value is ConfirmedReservation {
+  if (typeof value !== 'object' || value === null) {
+    return false
+  }
+
+  const candidate = value as Record<string, unknown>
+
+  return (
+    Array.isArray(candidate.selectedNumberLabels) &&
+    candidate.selectedNumberLabels.every((item) => typeof item === 'string') &&
+    typeof candidate.fullName === 'string' &&
+    typeof candidate.whatsApp === 'string' &&
+    typeof candidate.total === 'number'
+  )
+}
+
+function loadStoredLastConfirmedReservation() {
+  const storedValue = window.localStorage.getItem(
+    lastConfirmedReservationStorageKey,
+  )
 
   if (!storedValue) {
     return null
@@ -99,11 +128,7 @@ function loadStoredDrawResult() {
   try {
     const parsedValue: unknown = JSON.parse(storedValue)
 
-    if (
-      Array.isArray(parsedValue) &&
-      parsedValue.length > 0 &&
-      parsedValue.every(isValidDrawWinner)
-    ) {
+    if (isValidConfirmedReservation(parsedValue)) {
       return parsedValue
     }
   } catch {
@@ -128,6 +153,35 @@ function normalizeWhatsApp(value: string) {
   }
 
   return digitsOnly
+}
+
+function mapSupabaseRaffleNumberRow(row: SupabaseRaffleNumberRow) {
+  if (!isValidNumberStatus(row.status)) {
+    return null
+  }
+
+  return {
+    id: row.id,
+    label: row.label,
+    status: row.status,
+    reservedByName: row.reserved_by_name ?? undefined,
+    reservedByWhatsApp: row.reserved_by_whatsapp ?? undefined,
+  } satisfies RaffleNumber
+}
+
+function mapSupabaseDrawWinnerRow(row: SupabaseDrawWinnerRow) {
+  const mappedRow = {
+    prize: row.prize,
+    numberLabel: row.number_label,
+    fullName: row.full_name,
+    whatsApp: row.whatsapp,
+  } satisfies DrawWinner
+
+  if (!isValidDrawWinner(mappedRow)) {
+    return null
+  }
+
+  return mappedRow
 }
 
 function buildWhatsAppLink(reservation: ConfirmedReservation) {
@@ -156,14 +210,12 @@ function App() {
   const [whatsApp, setWhatsApp] = useState('')
   const [reservationError, setReservationError] = useState('')
   const [lastReservation, setLastReservation] =
-    useState<ConfirmedReservation | null>(null)
+    useState<ConfirmedReservation | null>(loadStoredLastConfirmedReservation)
   const [adminPasswordInput, setAdminPasswordInput] = useState('')
   const [adminUnlocked, setAdminUnlocked] = useState(false)
   const [adminError, setAdminError] = useState('')
   const [adminActionError, setAdminActionError] = useState('')
-  const [drawResult, setDrawResult] = useState<DrawWinner[] | null>(
-    loadStoredDrawResult,
-  )
+  const [drawResult, setDrawResult] = useState<DrawWinner[] | null>(null)
   const [drawError, setDrawError] = useState('')
   const isAdminView = isAdminMode && adminUnlocked
 
@@ -189,19 +241,8 @@ function App() {
 
       const rows = (data ?? []) as SupabaseRaffleNumberRow[]
       const mappedNumbers = rows.flatMap((row) => {
-        if (!isValidNumberStatus(row.status)) {
-          return []
-        }
-
-        return [
-          {
-            id: row.id,
-            label: row.label,
-            status: row.status,
-            reservedByName: row.reserved_by_name ?? undefined,
-            reservedByWhatsApp: row.reserved_by_whatsapp ?? undefined,
-          },
-        ]
+        const mappedRow = mapSupabaseRaffleNumberRow(row)
+        return mappedRow ? [mappedRow] : []
       })
 
       if (mappedNumbers.length !== totalRaffleNumbers) {
@@ -220,16 +261,116 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (drawResult) {
-      window.localStorage.setItem(
-        raffleDrawStorageKey,
-        JSON.stringify(drawResult),
+    const channel = supabase
+      .channel('raffle_numbers_realtime')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'raffle_numbers',
+        },
+        (payload) => {
+          if (payload.eventType === 'DELETE') {
+            const deletedRow = payload.old as Partial<SupabaseRaffleNumberRow>
+
+            if (typeof deletedRow.id !== 'number') {
+              return
+            }
+
+            setRaffleNumbers((current) =>
+              current.filter((number) => number.id !== deletedRow.id),
+            )
+            return
+          }
+
+          const nextRow = payload.new as SupabaseRaffleNumberRow
+          const mappedRow = mapSupabaseRaffleNumberRow(nextRow)
+
+          if (!mappedRow) {
+            return
+          }
+
+          setRaffleNumbers((current) => {
+            const existingIndex = current.findIndex(
+              (number) => number.id === mappedRow.id,
+            )
+
+            if (existingIndex === -1) {
+              return [...current, mappedRow].sort((a, b) => a.id - b.id)
+            }
+
+            const nextNumbers = [...current]
+            nextNumbers[existingIndex] = mappedRow
+            nextNumbers.sort((a, b) => a.id - b.id)
+            return nextNumbers
+          })
+        },
       )
+      .subscribe()
+
+    return () => {
+      void supabase.removeChannel(channel)
+    }
+  }, [])
+
+  useEffect(() => {
+    let isMounted = true
+
+    async function fetchDrawResult() {
+      const { data, error } = await supabase
+        .from('raffle_draw_results')
+        .select('id, prize, number_label, full_name, whatsapp, created_at')
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+
+      if (!isMounted) {
+        return
+      }
+
+      if (error) {
+        setDrawError('Não foi possível carregar o resultado do sorteio.')
+        return
+      }
+
+      const rows = (data ?? []) as SupabaseDrawWinnerRow[]
+
+      if (rows.length === 0) {
+        setDrawResult(null)
+        return
+      }
+
+      const mappedResult = rows.flatMap((row) => {
+        const mappedRow = mapSupabaseDrawWinnerRow(row)
+        return mappedRow ? [mappedRow] : []
+      })
+
+      if (mappedResult.length !== rows.length) {
+        setDrawError('Resultado do sorteio salvo está inválido.')
+        return
+      }
+
+      setDrawResult(mappedResult)
+    }
+
+    void fetchDrawResult()
+
+    return () => {
+      isMounted = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!lastReservation) {
+      window.localStorage.removeItem(lastConfirmedReservationStorageKey)
       return
     }
 
-    window.localStorage.removeItem(raffleDrawStorageKey)
-  }, [drawResult])
+    window.localStorage.setItem(
+      lastConfirmedReservationStorageKey,
+      JSON.stringify(lastReservation),
+    )
+  }, [lastReservation])
 
   const visibleNumbers =
     activeFilter === 'todos'
@@ -277,6 +418,8 @@ function App() {
     if (number.status !== 'livre') {
       return
     }
+
+    setLastReservation(null)
 
     setSelectedNumbers((current) => {
       const nextSelectedNumbers = current.includes(number.id)
@@ -332,19 +475,8 @@ function App() {
     }
 
     const updatedNumbers = data.flatMap((row) => {
-      if (!isValidNumberStatus(row.status)) {
-        return []
-      }
-
-      return [
-        {
-          id: row.id,
-          label: row.label,
-          status: row.status,
-          reservedByName: row.reserved_by_name ?? undefined,
-          reservedByWhatsApp: row.reserved_by_whatsapp ?? undefined,
-        },
-      ]
+      const mappedRow = mapSupabaseRaffleNumberRow(row)
+      return mappedRow ? [mappedRow] : []
     })
 
     if (updatedNumbers.length !== selectedNumbers.length) {
@@ -389,11 +521,7 @@ function App() {
     }
 
     const updatedNumber: RaffleNumber = {
-      id: data.id,
-      label: data.label,
-      status: data.status,
-      reservedByName: data.reserved_by_name ?? undefined,
-      reservedByWhatsApp: data.reserved_by_whatsapp ?? undefined,
+      ...mapSupabaseRaffleNumberRow(data)!,
     }
 
     setRaffleNumbers((current) =>
@@ -420,11 +548,7 @@ function App() {
     }
 
     const updatedNumber: RaffleNumber = {
-      id: data.id,
-      label: data.label,
-      status: data.status,
-      reservedByName: data.reserved_by_name ?? undefined,
-      reservedByWhatsApp: data.reserved_by_whatsapp ?? undefined,
+      ...mapSupabaseRaffleNumberRow(data)!,
     }
 
     setRaffleNumbers((current) =>
@@ -451,11 +575,7 @@ function App() {
     }
 
     const updatedNumber: RaffleNumber = {
-      id: data.id,
-      label: data.label,
-      status: data.status,
-      reservedByName: data.reserved_by_name ?? undefined,
-      reservedByWhatsApp: data.reserved_by_whatsapp ?? undefined,
+      ...mapSupabaseRaffleNumberRow(data)!,
     }
 
     setRaffleNumbers((current) =>
@@ -474,7 +594,7 @@ function App() {
     setAdminError('Senha incorreta.')
   }
 
-  function handleRunDraw() {
+  async function handleRunDraw() {
     setDrawError('')
 
     if (!isDrawUnlocked) {
@@ -542,12 +662,38 @@ function App() {
       availableParticipants.splice(participantIndex, 1)
     }
 
+    const { error } = await supabase.from('raffle_draw_results').insert(
+      winners.map((winner) => ({
+        prize: winner.prize,
+        number_label: winner.numberLabel,
+        full_name: winner.fullName,
+        whatsapp: winner.whatsApp,
+        created_at: new Date().toISOString(),
+      })),
+    )
+
+    if (error) {
+      setDrawError('Não foi possível salvar o resultado do sorteio.')
+      return
+    }
+
     setDrawResult(winners)
   }
 
-  function handleClearDrawResult() {
-    setDrawResult(null)
+  async function handleClearDrawResult() {
     setDrawError('')
+
+    const { error } = await supabase
+      .from('raffle_draw_results')
+      .delete()
+      .not('id', 'is', null)
+
+    if (error) {
+      setDrawError('Não foi possível limpar o resultado do sorteio.')
+      return
+    }
+
+    setDrawResult(null)
   }
 
   return (
@@ -730,7 +876,7 @@ function App() {
                         <button
                           type="button"
                           className="admin-button admin-button--neutral"
-                          onClick={handleClearDrawResult}
+                          onClick={() => void handleClearDrawResult()}
                         >
                           Limpar resultado do sorteio
                         </button>
