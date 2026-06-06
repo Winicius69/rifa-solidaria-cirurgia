@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './App.css'
 import { supabase } from './lib/supabase'
 
@@ -198,6 +198,7 @@ function buildWhatsAppLink(reservation: ConfirmedReservation) {
 }
 
 function App() {
+  const reservationSummaryRef = useRef<HTMLDivElement | null>(null)
   const isAdminMode = window.location.search.includes('admin=1')
   const [raffleNumbers, setRaffleNumbers] =
     useState<RaffleNumber[]>(initialRaffleNumbers)
@@ -696,6 +697,14 @@ function App() {
     setDrawResult(null)
   }
 
+  function handleContinueReservation() {
+    setShowReservationForm(true)
+    reservationSummaryRef.current?.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start',
+    })
+  }
+
   return (
     <div className="page">
       {!isAdminView ? (
@@ -982,7 +991,7 @@ function App() {
               <h2>Seleção de números</h2>
             </div>
 
-            <div className="selection-summary">
+            <div ref={reservationSummaryRef} className="selection-summary">
               <h3>Minha reserva</h3>
 
               {selectedNumberLabels.length > 0 ? (
@@ -1011,7 +1020,7 @@ function App() {
               <button
                 type="button"
                 className="reserve-button"
-                onClick={() => setShowReservationForm(true)}
+                onClick={handleContinueReservation}
               >
                 Continuar reserva
               </button>
@@ -1116,6 +1125,23 @@ function App() {
           </section>
         ) : null}
       </main>
+
+      {selectedNumbers.length > 0 && !isAdminView ? (
+        <div className="floating-reservation-bar">
+          <div className="floating-reservation-bar__info">
+            <span>{selectedNumbers.length} selecionado(s)</span>
+            <strong>{formatCurrency(selectedTotal)}</strong>
+          </div>
+
+          <button
+            type="button"
+            className="floating-reservation-bar__button"
+            onClick={handleContinueReservation}
+          >
+            Continuar reserva
+          </button>
+        </div>
+      ) : null}
 
       <footer className="footer">
         <p>Rifa Solidária para Cirurgia</p>
