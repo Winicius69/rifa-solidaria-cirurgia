@@ -725,32 +725,32 @@ function App() {
             <section className="card">
               <div className="section-heading">
                 <span className="section-heading__tag">Prêmios</span>
-                <h2>Itens da rifa</h2>
+                <h2>Confira os prêmios da rifa</h2>
               </div>
 
               <div className="prize-list">
                 <article className="prize-item">
-                  <strong>1º prêmio</strong>
+                  <strong className="prize-rank prize-rank--top">🥇 1º prêmio</strong>
                   <p>Uma cesta básica</p>
                 </article>
                 <article className="prize-item">
-                  <strong>2º prêmio</strong>
+                  <strong className="prize-rank prize-rank--top">🥈 2º prêmio</strong>
                   <p>Uma rede</p>
                 </article>
                 <article className="prize-item">
-                  <strong>3º prêmio</strong>
+                  <strong className="prize-rank prize-rank--top">🥉 3º prêmio</strong>
                   <p>Uma selagem da Charmosa Beauty</p>
                 </article>
                 <article className="prize-item">
-                  <strong>4º prêmio</strong>
+                  <strong className="prize-rank">4º prêmio</strong>
                   <p>Uma extensão de unhas da Ruth Elly</p>
                 </article>
                 <article className="prize-item">
-                  <strong>5º prêmio</strong>
+                  <strong className="prize-rank">5º prêmio</strong>
                   <p>2 caixas de cerveja lata</p>
                 </article>
                 <article className="prize-item">
-                  <strong>6º prêmio</strong>
+                  <strong className="prize-rank">6º prêmio</strong>
                   <p>Um pix de 100 reais</p>
                 </article>
               </div>
